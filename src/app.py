@@ -93,6 +93,9 @@ async def get_feed(user_id: User = Depends(get_current_user)):
     async for post in data:
         post["_id"] = str(post["_id"])
         post["userId"] = str(post["userId"])
+        post["liked_by"] = [str(uid) for uid in post.get("liked_by", [])]
+        if "created_at" in post:
+            post["created_at"] = str(post["created_at"])
         
         if user_id != post["userId"]:
             items.append(post)
@@ -343,6 +346,9 @@ async def get_public_profile(username: str):
     for post in posts:
         post["_id"] = str(post["_id"])
         post["userId"] = str(post["userId"])
+        post["liked_by"] = [str(uid) for uid in post.get("liked_by", [])]
+        if "created_at" in post:
+            post["created_at"] = str(post["created_at"])
 
     return {
         "user": user,
@@ -353,6 +359,7 @@ async def get_public_profile(username: str):
 async def get_profile(user_id: str = Depends(get_current_user)):
     users_collection = database["user"]
     posts_collection = database["post"]
+    profiledata_collection = database["profile-data"]
 
     user = await users_collection.find_one(
         {"_id": ObjectId(user_id)},
@@ -361,6 +368,16 @@ async def get_profile(user_id: str = Depends(get_current_user)):
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    profileInfo = await profiledata_collection.find_one(
+        {"userId": ObjectId(user_id)}
+    )
+
+    if profileInfo:
+        profileInfo["_id"] = str(profileInfo["_id"])
+        profileInfo["userId"] = str(profileInfo["userId"])
+        profileInfo["followers"] = [str(f) for f in profileInfo.get("followers", [])]
+        profileInfo["following"] = [str(f) for f in profileInfo.get("following", [])]
 
     posts = await posts_collection.find(
         {"userId": ObjectId(user_id)}
@@ -371,9 +388,13 @@ async def get_profile(user_id: str = Depends(get_current_user)):
     for post in posts:
         post["_id"] = str(post["_id"])
         post["userId"] = str(post["userId"])
+        post["liked_by"] = [str(uid) for uid in post.get("liked_by", [])]
+        if "created_at" in post:
+            post["created_at"] = str(post["created_at"])
 
     return {
         "user": user,
+        "profile-data": profileInfo,
         "posts": posts
     }
 
@@ -393,44 +414,50 @@ async def follow_user(
         if not user_follower:
             raise HTTPException(status_code=404, detail="User profile not found")
 
-        result = await collection_profiledata.update_one(
-            {"userId": ObjectId(user_to_follow)},
-            {
-                "$addToSet": {"followers": ObjectId(user_id)}
-            }
-        )
-
         user_by = await collection_user.find_one({
             "_id": ObjectId(user_id)
         })
+
+        if not user_by:
+            raise HTTPException(status_code=404, detail="User not found")
 
         user_to = await collection_user.find_one({
             "_id": ObjectId(user_to_follow)
         })
 
+        if not user_to:
+            raise HTTPException(status_code=404, detail="User to follow not found")
+
+        result = await collection_profiledata.update_one(
+            {"userId": ObjectId(user_to_follow)},
+            {
+                "$addToSet": {"followers": user_by["userId"]}
+            }
+        )
+
         if result.modified_count > 0:
             await collection_profiledata.update_one(
                 {"userId": ObjectId(user_id)},
                 {
-                    "$addToSet": {"following": ObjectId(user_to_follow)}
+                    "$addToSet": {"following": user_to["userId"]}
                 }
             )
-            return {"message": f"{user_by["userId"]} followed {user_to["userId"]}"}
+            return {"message": f"{user_by['userId']} followed {user_to['userId']}"}
         else:
             await collection_profiledata.update_one(
                 {"userId": ObjectId(user_to_follow)},
                 {
-                    "$pull": {"followers": ObjectId(user_id)}
+                    "$pull": {"followers": user_by["userId"]}
                 }
             )
 
             await collection_profiledata.update_one(
                 {"userId": ObjectId(user_id)},
                 {
-                    "$pull": {"following": ObjectId(user_to_follow)}
+                    "$pull": {"following": user_to["userId"]}
                 }
             )
-            return {"message": f"{user_by["userId"]} unfollowed {user_to["userId"]}"}
+            return {"message": f"{user_by['userId']} unfollowed {user_to['userId']}"}
 
     except HTTPException:
         raise
@@ -443,4 +470,21 @@ async def search_profile(
     searched: str,
     user_id: str = Depends(get_current_user)
 ):
-    pass
+    try:
+        collection = database["user"]
+
+        users = await collection.find(
+            {"userId": searched},
+            {"_id": 0, "userId": 1}
+        ).to_list(500)
+
+        if users:
+            return {"User Found": searched}
+
+        return {"message": "User not found"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
